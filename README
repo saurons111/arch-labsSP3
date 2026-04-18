@@ -1,0 +1,16 @@
+# Лабораторная работа 1 — Docker
+
+Проект представляет собой REST API для управления задачами.
+
+Приложение реализовано на FastAPI и использует PostgreSQL для хранения данных.
+
+## Состав
+
+- `app/` — исходный код приложения
+- `docker/Dockerfile` — файл сборки Docker-образа
+- `docker/docker-compose.yml` — запуск приложения и PostgreSQL
+
+## Запуск
+
+```bash
+docker compose -f docker/docker-compose.yml up --build
