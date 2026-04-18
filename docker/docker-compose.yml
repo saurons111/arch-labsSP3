@@ -12,9 +12,13 @@ services:
       DB_NAME: archdb
       DB_USER: archuser
       DB_PASSWORD: archpass
+      REDIS_HOST: keydb
+      REDIS_PORT: 6379
     depends_on:
       postgres:
         condition: service_healthy
+      keydb:
+        condition: service_started
 
   postgres:
     image: postgres:16
@@ -33,5 +37,15 @@ services:
       timeout: 5s
       retries: 10
 
+
+  keydb:
+    image: eqalpha/keydb:x86_64_v5.3.3
+    container_name: keydb
+    command: "keydb-server /etc/keydb/redis.conf --server-threads 2"
+    ports:
+      - "6379:6379"
+    volumes:
+      - keydb_data:/data
 volumes:
+  keydb_data:
   postgres_data:

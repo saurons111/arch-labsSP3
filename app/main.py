@@ -1,4 +1,6 @@
 import os
+import json
+import redis
 from typing import List
 
 from fastapi import FastAPI, Depends, HTTPException
@@ -12,6 +14,15 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "archdb")
 DB_USER = os.getenv("DB_USER", "archuser")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "archpass")
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    decode_responses=True
+)
 
 DATABASE_URL = (
     f"postgresql://{DB_USER}:{DB_PASSWORD}"
@@ -90,12 +101,27 @@ def get_tasks(db: Session = Depends(get_db)):
 
 @app.get("/tasks/{task_id}", response_model=TaskRead)
 def get_task(task_id: int, db: Session = Depends(get_db)):
+    cache_key = f"task:{task_id}"
+
+    cached_task = redis_client.get(cache_key)
+    if cached_task:
+        return json.loads(cached_task)
+
     task = db.query(Task).filter(Task.id == task_id).first()
 
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    return task
+    task_data = {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "completed": task.completed
+    }
+
+    redis_client.setex(cache_key, 60, json.dumps(task_data))
+
+    return task_data
 
 
 @app.delete("/tasks/{task_id}")
@@ -107,5 +133,7 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
 
     db.delete(task)
     db.commit()
+
+    redis_client.delete(f"task:{task_id}")
 
     return {"message": "Task deleted"}
