@@ -14,3 +14,178 @@
 
 ```bash
 docker compose -f docker/docker-compose.yml up --build
+
+
+
+## Лабораторная работа 2 — Кэширование
+
+Во второй лабораторной работе к проекту было добавлено кэширование с использованием KeyDB.
+
+KeyDB используется как быстрое key-value хранилище, в котором временно сохраняются данные, чтобы уменьшить количество обращений к основной базе данных PostgreSQL.
+
+### Состав
+
+В проект были внесены следующие изменения:
+
+- в `docker-compose.yml` добавлен контейнер `keydb`
+- в `app/requirements.txt` добавлена библиотека `redis`
+- в `app/main.py` добавлена логика cache-aside
+- в `screenshots/laba2/` добавлены скриншоты проверки KeyDB и кэширования
+
+После запуска проекта работают три контейнера:
+
+- `arch_app` — FastAPI-приложение
+- `arch_postgres` — база данных PostgreSQL
+- `keydb` — хранилище кэша
+
+### Запуск
+
+```bash
+docker compose -f docker/docker-compose.yml up --build
+```
+
+### Подключение к KeyDB через CLI
+
+```bash
+docker exec -it keydb keydb-cli
+```
+
+Проверка соединения:
+
+```redis
+PING
+```
+
+Ожидаемый ответ:
+
+```text
+PONG
+```
+
+### Использованные типы данных KeyDB
+
+#### String
+
+```redis
+SET fullname "Sasha Student"
+GET fullname
+```
+
+#### Hash
+
+```redis
+HSET user:1 name "Sasha" age 20 email "sasha@example.com"
+HGETALL user:1
+```
+
+#### List
+
+```redis
+LPUSH schedule "math" "architecture" "english"
+LRANGE schedule 0 -1
+```
+
+#### Set
+
+```redis
+SADD skills "python" "docker" "keydb"
+SMEMBERS skills
+```
+
+#### Sorted Set
+
+```redis
+ZADD tasks 1 "low priority" 5 "middle priority" 10 "high priority"
+ZRANGE tasks 0 -1 WITHSCORES
+```
+
+#### TTL
+
+```redis
+SET temp_key "delete me" EX 60
+TTL temp_key
+PERSIST temp_key
+TTL temp_key
+```
+
+### Реализация cache-aside
+
+В приложении реализована стратегия кэширования cache-aside для endpoint:
+
+```text
+GET /tasks/{task_id}
+```
+
+Логика работы:
+
+1. Пользователь запрашивает задачу по id.
+2. Приложение формирует ключ кэша вида `task:{task_id}`.
+3. Сначала приложение проверяет наличие задачи в KeyDB.
+4. Если задача есть в кэше, она возвращается из KeyDB.
+5. Если задачи нет в кэше, приложение получает её из PostgreSQL.
+6. После получения из PostgreSQL задача сохраняется в KeyDB с TTL 60 секунд.
+7. При удалении задачи через `DELETE /tasks/{task_id}` соответствующий ключ удаляется из KeyDB.
+
+### Проверка cache-aside
+
+Сначала через Swagger UI создаётся задача:
+
+```text
+POST /tasks
+```
+
+Затем задача запрашивается по id:
+
+```text
+GET /tasks/{task_id}
+```
+
+После первого запроса в KeyDB появляется ключ вида:
+
+```text
+task:{task_id}
+```
+
+Например:
+
+```redis
+GET task:5
+TTL task:5
+```
+
+Если `GET task:5` возвращает JSON с задачей, а `TTL task:5` показывает оставшееся время жизни ключа, значит кэширование работает корректно.
+
+При удалении задачи через:
+
+```text
+DELETE /tasks/{task_id}
+```
+
+ключ удаляется из KeyDB.
+
+Проверка удаления ключа:
+
+```redis
+GET task:5
+```
+
+Ожидаемый результат после удаления:
+
+```text
+(nil)
+```
+
+### Скриншоты
+
+Скриншоты проверки KeyDB и cache-aside находятся в папке:
+
+```text
+screenshots/laba2/
+```
+
+В этой папке должны быть скриншоты:
+
+- создания разных типов данных в KeyDB
+- проверки появления ключа `task:{id}` после запроса задачи
+- проверки TTL ключа
+- удаления ключа из кэша
