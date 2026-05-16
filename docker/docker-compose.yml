@@ -26,6 +26,50 @@ services:
       rabbitmq:
         condition: service_started
 
+## 8025 — веб-интерфейс Mailpit
+## 1025 — SMTP-порт, куда Alertmanager будет отправлять письма
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ../monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml
+    depends_on:
+      - app
+
+
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: redis_exporter
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: redis://keydb:6379
+    depends_on:
+      - keydb
+
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ../monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    depends_on:
+      - prometheus
+      - mailpit
+
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -73,6 +117,19 @@ services:
         condition: service_started
 
 
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
   keydb:
     image: eqalpha/keydb:x86_64_v5.3.3
     container_name: keydb
@@ -85,3 +142,4 @@ volumes:
   rabbitmq_data:
   keydb_data:
   postgres_data:
+  grafana_data:

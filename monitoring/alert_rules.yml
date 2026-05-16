@@ -1,0 +1,44 @@
+##AppTargetDown — приложение недоступно
+##TooManyTasks — задач больше 20
+##NoTasksCreated — задач пока не создавали
+
+groups:
+  - name: architecture-labs-alerts
+    rules:
+      - alert: AppTargetDown
+        expr: up{job="arch_app"} == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "FastAPI application is down"
+          description: "Prometheus cannot scrape metrics from arch_app."
+
+
+      - alert: TestAlwaysFiring
+        expr: vector(1)
+        for: 5s
+        labels:
+          severity: test
+        annotations:
+          summary: "Test alert is firing"
+          description: "This alert is used to check Alertmanager email delivery through Mailpit."
+
+          
+      - alert: TooManyTasks
+        expr: tasks_in_database > 20
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Too many tasks in database"
+          description: "The number of tasks in database is greater than 20."
+
+      - alert: NoTasksCreated
+        expr: tasks_created_total == 0
+        for: 30s
+        labels:
+          severity: info
+        annotations:
+          summary: "No tasks were created"
+          description: "No tasks have been created since application startup."

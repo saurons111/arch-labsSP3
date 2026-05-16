@@ -1,5 +1,8 @@
 import os
 import pika
+import time
+from fastapi.responses import Response
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 import json
 import redis
 from typing import List
@@ -45,6 +48,27 @@ Base = declarative_base()
 
 app = FastAPI(title="Architecture Labs Task Service")
 
+TASKS_CREATED_TOTAL = Counter(
+    "tasks_created_total",
+    "Total number of created tasks"
+)
+
+HTTP_REQUESTS_TOTAL = Counter(
+    "http_requests_total",
+    "Total number of HTTP requests",
+    ["method", "endpoint"]
+)
+
+TASK_REQUEST_DURATION_SECONDS = Histogram(
+    "task_request_duration_seconds",
+    "Task request duration in seconds",
+    ["method", "endpoint"]
+)
+
+TASKS_IN_DATABASE = Gauge(
+    "tasks_in_database",
+    "Current number of tasks in database"
+)
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -85,10 +109,19 @@ def startup():
 
 @app.get("/")
 def root():
+    
     return {
         "message": "Architecture Labs API is running",
         "lab": "Lab 1 Docker + PostgreSQL"
     }
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(
+        generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 
 ##функция которая будет отправлять событие в RABBITMQ
@@ -146,6 +179,8 @@ def publish_task_created_event(task: Task):
 
 @app.post("/tasks", response_model=TaskRead)
 def create_task(task: TaskCreate, db: Session = Depends(get_db)):
+    start_time = time.time()
+
     new_task = Task(
         title=task.title,
         description=task.description,
@@ -154,7 +189,19 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)):
     db.add(new_task)
     db.commit()
     db.refresh(new_task)
+
+    TASKS_CREATED_TOTAL.inc()
+    HTTP_REQUESTS_TOTAL.labels(method="POST", endpoint="/tasks").inc()
+    TASK_REQUEST_DURATION_SECONDS.labels(
+        method="POST",
+        endpoint="/tasks"
+    ).observe(time.time() - start_time)
+
+    tasks_count = db.query(Task).count()
+    TASKS_IN_DATABASE.set(tasks_count)
+
     publish_task_created_event(new_task)
+
     return new_task
 
 
