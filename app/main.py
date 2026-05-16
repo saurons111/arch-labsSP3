@@ -4,12 +4,13 @@ import time
 from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 import json
+from datetime import datetime
 import redis
 from typing import List
 
 from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 
@@ -79,6 +80,34 @@ class Task(Base):
     completed = Column(Boolean, default=False)
 
 
+class BalanceEvent(Base):
+    __tablename__ = "balance_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    event_type = Column(String, nullable=False)
+    amount = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BalanceView(Base):
+    __tablename__ = "balance_view"
+
+    user_id = Column(String, primary_key=True, index=True)
+    balance = Column(Float, nullable=False, default=0.0)
+
+
+class BalanceHistoryEntry(Base):
+    __tablename__ = "balance_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True, nullable=False)
+    operation_type = Column(String, nullable=False)
+    amount = Column(Float, nullable=True)
+    balance_after = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class TaskCreate(BaseModel):
     title: str
     description: str | None = None
@@ -94,12 +123,117 @@ class TaskRead(BaseModel):
         from_attributes = True
 
 
+class BalanceAmountCommand(BaseModel):
+    amount: float
+
+
+class BalanceRead(BaseModel):
+    user_id: str
+    balance: float
+
+    class Config:
+        from_attributes = True
+
+
+class BalanceHistoryRead(BaseModel):
+    id: int
+    user_id: str
+    operation_type: str
+    amount: float | None
+    balance_after: float
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BalanceEventRead(BaseModel):
+    id: int
+    user_id: str
+    event_type: str
+    amount: float | None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+
+## Записывает событие в Event Store
+def append_balance_event(
+    db: Session,
+    user_id: str,
+    event_type: str,
+    amount: float | None = None
+):
+    event = BalanceEvent(
+        user_id=user_id,
+        event_type=event_type,
+        amount=amount
+    )
+
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return event
+
+##берёт все события пользователя и заново строит read-модели:
+def rebuild_balance_projection(user_id: str, db: Session):
+    events = (
+        db.query(BalanceEvent)
+        .filter(BalanceEvent.user_id == user_id)
+        .order_by(BalanceEvent.id)
+        .all()
+    )
+
+    db.query(BalanceView).filter(BalanceView.user_id == user_id).delete()
+    db.query(BalanceHistoryEntry).filter(BalanceHistoryEntry.user_id == user_id).delete()
+    db.commit()
+
+    current_balance = 0.0
+
+    for event in events:
+        if event.event_type == "BALANCE_CREATED":
+            current_balance = 0.0
+            operation_type = "CREATE"
+
+        elif event.event_type == "BALANCE_CREDITED":
+            current_balance += event.amount
+            operation_type = "CREDIT"
+
+        elif event.event_type == "BALANCE_DEBITED":
+            current_balance -= event.amount
+            operation_type = "DEBIT"
+
+        else:
+            continue
+
+        history_entry = BalanceHistoryEntry(
+            user_id=user_id,
+            operation_type=operation_type,
+            amount=event.amount,
+            balance_after=current_balance,
+            created_at=event.created_at
+        )
+
+        db.add(history_entry)
+
+    balance_view = BalanceView(
+        user_id=user_id,
+        balance=current_balance
+    )
+
+    db.add(balance_view)
+    db.commit()
 
 
 @app.on_event("startup")
@@ -249,3 +383,141 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     redis_client.delete(f"task:{task_id}")
 
     return {"message": "Task deleted"}
+
+
+
+# =========================
+# Lab 5 — CQRS Command Side
+# =========================
+#/create → создаёт событие BALANCE_CREATED
+#/credit → создаёт событие BALANCE_CREDITED
+#/debit → создаёт событие BALANCE_DEBITED
+
+
+@app.post("/balances/{user_id}/create")
+def create_balance(user_id: str, db: Session = Depends(get_db)):
+    existing_events = (
+        db.query(BalanceEvent)
+        .filter(BalanceEvent.user_id == user_id)
+        .count()
+    )
+
+    if existing_events > 0:
+        raise HTTPException(status_code=400, detail="Balance already exists")
+
+    append_balance_event(
+        db=db,
+        user_id=user_id,
+        event_type="BALANCE_CREATED",
+        amount=None
+    )
+
+    rebuild_balance_projection(user_id, db)
+
+    return {
+        "message": "Balance created",
+        "user_id": user_id
+    }
+
+
+@app.post("/balances/{user_id}/credit")
+def credit_balance(
+    user_id: str,
+    command: BalanceAmountCommand,
+    db: Session = Depends(get_db)
+):
+    if command.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+
+    balance = db.query(BalanceView).filter(BalanceView.user_id == user_id).first()
+
+    if balance is None:
+        raise HTTPException(status_code=404, detail="Balance not found")
+
+    append_balance_event(
+        db=db,
+        user_id=user_id,
+        event_type="BALANCE_CREDITED",
+        amount=command.amount
+    )
+
+    rebuild_balance_projection(user_id, db)
+
+    return {
+        "message": "Balance credited",
+        "user_id": user_id,
+        "amount": command.amount
+    }
+
+
+@app.post("/balances/{user_id}/debit")
+def debit_balance(
+    user_id: str,
+    command: BalanceAmountCommand,
+    db: Session = Depends(get_db)
+):
+    if command.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+
+    balance = db.query(BalanceView).filter(BalanceView.user_id == user_id).first()
+
+    if balance is None:
+        raise HTTPException(status_code=404, detail="Balance not found")
+
+    if balance.balance < command.amount:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+
+    append_balance_event(
+        db=db,
+        user_id=user_id,
+        event_type="BALANCE_DEBITED",
+        amount=command.amount
+    )
+
+    rebuild_balance_projection(user_id, db)
+
+    return {
+        "message": "Balance debited",
+        "user_id": user_id,
+        "amount": command.amount
+    }
+
+
+
+# =========================
+# Lab 5 — CQRS Query Side
+# =========================
+
+
+#/balances/{user_id}          → читает read-модель текущего баланса
+#/balances/{user_id}/history  → читает read-модель истории
+#/balances/{user_id}/events   → показывает Event Store
+
+@app.get("/balances/{user_id}", response_model=BalanceRead)
+def get_balance(user_id: str, db: Session = Depends(get_db)):
+    balance = db.query(BalanceView).filter(BalanceView.user_id == user_id).first()
+
+    if balance is None:
+        raise HTTPException(status_code=404, detail="Balance not found")
+
+    return balance
+
+
+@app.get("/balances/{user_id}/history", response_model=List[BalanceHistoryRead])
+def get_balance_history(user_id: str, db: Session = Depends(get_db)):
+    return (
+        db.query(BalanceHistoryEntry)
+        .filter(BalanceHistoryEntry.user_id == user_id)
+        .order_by(BalanceHistoryEntry.id)
+        .all()
+    )
+
+
+@app.get("/balances/{user_id}/events", response_model=List[BalanceEventRead])
+def get_balance_events(user_id: str, db: Session = Depends(get_db)):
+    return (
+        db.query(BalanceEvent)
+        .filter(BalanceEvent.user_id == user_id)
+        .order_by(BalanceEvent.id)
+        .all()
+    )
