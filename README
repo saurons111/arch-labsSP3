@@ -189,3 +189,218 @@ screenshots/laba2/
 - проверки появления ключа `task:{id}` после запроса задачи
 - проверки TTL ключа
 - удаления ключа из кэша
+
+
+
+---
+
+## Лабораторная работа 3 — Event-driven архитектура RabbitMQ
+
+В третьей лабораторной работе к проекту был добавлен брокер сообщений RabbitMQ. RabbitMQ используется для реализации event-driven взаимодействия между сервисами.
+
+В рамках работы были выполнены две части:
+
+1. Ручная настройка RabbitMQ через UI-панель администрирования.
+2. Подключение RabbitMQ к приложению для асинхронной коммуникации между сервисами.
+
+### Состав сервисов
+
+После выполнения лабораторной работы через Docker Compose запускаются следующие контейнеры:
+
+- `arch_app` — основное FastAPI-приложение
+- `arch_postgres` — база данных PostgreSQL
+- `keydb` — кэш-хранилище KeyDB
+- `rabbitmq` — брокер сообщений RabbitMQ
+- `notification_worker` — сервис-обработчик событий
+
+### Запуск проекта
+
+```bash
+docker compose -f docker/docker-compose.yml up --build
+```
+
+RabbitMQ Management UI доступен по адресу:
+
+```text
+http://localhost:15672
+```
+
+Данные для входа:
+
+```text
+login: guest
+password: guest
+```
+
+### Ручная настройка RabbitMQ
+
+В RabbitMQ UI были созданы следующие exchange:
+
+- `SP3.7.fanout` — exchange типа fanout
+- `SP3.7.direct` — exchange типа direct
+- `SP3.7.topic` — exchange типа topic
+- `SP3.7.headers` — exchange типа headers
+
+Также была создана очередь:
+
+```text
+queue.SP3.7
+```
+
+### Bindings
+
+Для очереди `queue.SP3.7` были настроены следующие bindings:
+
+- `SP3.7.fanout` → `queue.SP3.7` без routing key
+- `SP3.7.direct` → `queue.SP3.7` с routing key `SP3.7.routing.key`
+- `SP3.7.topic` → `queue.SP3.7` с routing key `SP3.*.routing.key`
+- `SP3.7.headers` → `queue.SP3.7` с headers:
+  - `x-match = all`
+  - `group = SP3`
+  - `number = 7`
+
+### Проверка routing logic
+
+#### Fanout exchange
+
+Fanout exchange отправляет сообщение во все связанные очереди независимо от routing key.
+
+Были отправлены два сообщения:
+
+- без routing key
+- с произвольным routing key
+
+Оба сообщения попали в очередь `queue.SP3.7`.
+
+#### Direct exchange
+
+Direct exchange отправляет сообщение в очередь только при точном совпадении routing key.
+
+Binding был настроен с routing key:
+
+```text
+SP3.7.routing.key
+```
+
+Сообщение с routing key `SP3.7.routing.key` попало в очередь.  
+Сообщение с другим routing key не попало в очередь.
+
+#### Topic exchange
+
+Topic exchange маршрутизирует сообщения по шаблону routing key.
+
+Binding был настроен с routing key:
+
+```text
+SP3.*.routing.key
+```
+
+Сообщение с routing key `SP3.7.routing.key` попало в очередь.  
+Сообщение с routing key `SP3.7.extra.routing.key` не попало в очередь, так как символ `*` соответствует ровно одному слову.
+
+#### Headers exchange
+
+Headers exchange маршрутизирует сообщения по headers, а не по routing key.
+
+Binding был настроен с headers:
+
+```text
+x-match = all
+group = SP3
+number = 7
+```
+
+Сообщение с headers `group = SP3` и `number = 7` попало в очередь.  
+Сообщение только с одним header не попало в очередь.
+
+### Event-driven взаимодействие в приложении
+
+В приложении реализована асинхронная коммуникация между двумя сервисами:
+
+```text
+arch_app → RabbitMQ → notification_worker
+```
+
+`arch_app` выступает в роли producer.  
+`notification_worker` выступает в роли consumer.  
+RabbitMQ выступает в роли broker.
+
+При создании задачи через endpoint:
+
+```text
+POST /tasks
+```
+
+основное приложение:
+
+1. сохраняет задачу в PostgreSQL;
+2. публикует событие `task.created` в RabbitMQ;
+3. отправляет сообщение в exchange `task.exchange`;
+4. RabbitMQ маршрутизирует сообщение в очередь `task.events`;
+5. `notification_worker` получает сообщение из очереди и выводит его в лог.
+
+### RabbitMQ-сущности приложения
+
+Для event-driven части приложения используются:
+
+```text
+Exchange: task.exchange
+Type: topic
+Queue: task.events
+Routing key: task.created
+Binding: task.*
+```
+
+### Producer
+
+Producer реализован в FastAPI-приложении. После создания задачи вызывается отправка события в RabbitMQ.
+
+Событие содержит данные созданной задачи:
+
+```text
+event
+id
+title
+description
+completed
+```
+
+### Consumer
+
+Consumer реализован в отдельном сервисе `notification_worker`.
+
+Он слушает очередь:
+
+```text
+task.events
+```
+
+При получении сообщения worker выводит событие в лог.
+
+### Скриншоты
+
+Скриншоты для третьей лабораторной работы находятся в папке:
+
+```text
+screenshots/laba3/
+```
+
+В папке должны быть следующие скриншоты:
+
+- `exchanges_list.png` — список exchange
+- `queues_list.png` — список очередей
+- `bindings_queue_SP3_7.png` — bindings очереди `queue.SP3.7`
+- `fanout_routing.png` — проверка fanout routing
+- `direct_routing.png` — проверка direct routing
+- `topic_routing.png` — проверка topic routing
+- `headers_routing.png` — проверка headers routing
+- `docker_containers_lab3.png` — контейнеры проекта
+- `event_driven_working.png` — успешная работа event-driven взаимодействия
+- `task_exchange_created_by_app.png` — exchange `task.exchange`
+- `task_events_queue_created_by_app.png` — очередь `task.events`
+
+### Итог
+
+В лабораторной работе был поднят RabbitMQ, через UI были созданы exchange разных типов, очередь и bindings. Была продемонстрирована логика маршрутизации сообщений для fanout, direct, topic и headers exchange.
+
+Также в приложение было добавлено event-driven взаимодействие: при создании задачи FastAPI-приложение публикует событие `task.created` в RabbitMQ, а отдельный сервис `notification_worker` получает это событие из очереди и обрабатывает его асинхронно.
