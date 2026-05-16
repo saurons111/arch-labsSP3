@@ -1,4 +1,5 @@
 import os
+import pika
 import json
 import redis
 from typing import List
@@ -23,6 +24,15 @@ redis_client = redis.Redis(
     port=REDIS_PORT,
     decode_responses=True
 )
+
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
+
+TASK_EXCHANGE = "task.exchange"
+TASK_QUEUE = "task.events"
+TASK_ROUTING_KEY = "task.created"
 
 DATABASE_URL = (
     f"postgresql://{DB_USER}:{DB_PASSWORD}"
@@ -81,6 +91,59 @@ def root():
     }
 
 
+##функция которая будет отправлять событие в RABBITMQ
+def publish_task_created_event(task: Task):
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
+
+    parameters = pika.ConnectionParameters(
+        host=RABBITMQ_HOST,
+        port=RABBITMQ_PORT,
+        credentials=credentials
+    )
+
+    connection = pika.BlockingConnection(parameters)
+    channel = connection.channel()
+
+    channel.exchange_declare(
+        exchange=TASK_EXCHANGE,
+        exchange_type="topic",
+        durable=True
+    )
+
+    channel.queue_declare(
+        queue=TASK_QUEUE,
+        durable=True
+    )
+
+    channel.queue_bind(
+        exchange=TASK_EXCHANGE,
+        queue=TASK_QUEUE,
+        routing_key="task.*"
+    )
+
+    event = {
+        "event": "task.created",
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "completed": task.completed
+    }
+
+    channel.basic_publish(
+        exchange=TASK_EXCHANGE,
+        routing_key=TASK_ROUTING_KEY,
+        body=json.dumps(event),
+        properties=pika.BasicProperties(
+            delivery_mode=2,
+            content_type="application/json"
+        )
+    )
+
+    connection.close()
+
+
+
+
 @app.post("/tasks", response_model=TaskRead)
 def create_task(task: TaskCreate, db: Session = Depends(get_db)):
     new_task = Task(
@@ -91,6 +154,7 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)):
     db.add(new_task)
     db.commit()
     db.refresh(new_task)
+    publish_task_created_event(new_task)
     return new_task
 
 
@@ -119,6 +183,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
         "completed": task.completed
     }
 
+##333
     redis_client.setex(cache_key, 60, json.dumps(task_data))
 
     return task_data

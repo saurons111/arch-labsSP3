@@ -7,6 +7,10 @@ services:
     ports:
       - "8080:8080"
     environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: archdb
@@ -19,6 +23,21 @@ services:
         condition: service_healthy
       keydb:
         condition: service_started
+      rabbitmq:
+        condition: service_started
+
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
 
   postgres:
     image: postgres:16
@@ -38,6 +57,22 @@ services:
       retries: 10
 
 
+  notification_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: notification_worker
+    command: ["python", "worker.py"]
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+    depends_on:
+      rabbitmq:
+        condition: service_started
+
+
   keydb:
     image: eqalpha/keydb:x86_64_v5.3.3
     container_name: keydb
@@ -47,5 +82,6 @@ services:
     volumes:
       - keydb_data:/data
 volumes:
+  rabbitmq_data:
   keydb_data:
   postgres_data:
